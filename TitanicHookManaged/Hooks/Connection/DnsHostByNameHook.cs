@@ -62,7 +62,7 @@ public class DnsHostByNameHook : TitanicPatch
     #region Hook
 
     // Store the hostname being resolved (before potential modification)
-    [ThreadStatic]
+    [System.ThreadStatic]
     private static string? _currentHostname;
 
     private static void InternalGetHostByNamePrefix(ref string __0)
