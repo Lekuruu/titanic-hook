@@ -376,7 +376,7 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
             }
         }
         
-        Logging.Error(HookName, $"SSL handshake failed: {lastException?.Message}");
+        Logging.Error($"SSL handshake failed: {lastException?.Message}");
         
         networkStream?.Dispose();
         sslStream?.Dispose();
