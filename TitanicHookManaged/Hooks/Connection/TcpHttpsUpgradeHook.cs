@@ -138,7 +138,7 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         // Verify socket is actually connected before attempting SSL
         if (!__instance.Connected)
         {
-            Logging.Warning(HookName, $"Socket not connected after Connect(), skipping SSL for {hostname}");
+            Logging.Warning($"Socket not connected after Connect(), skipping SSL for {hostname}");
             return;
         }
         
