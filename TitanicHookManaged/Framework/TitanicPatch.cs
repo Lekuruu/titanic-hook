@@ -23,7 +23,7 @@ public abstract class TitanicPatch
     public List<MethodInfo> Postfixes { get; set; } = [];
     public List<MethodInfo> Transpilers { get; set; } = [];
 
-    private HarmonyInstance Harmony;
+    protected HarmonyInstance Harmony { get; private set; }
     
     public TitanicPatch(string hookName)
     {
@@ -31,7 +31,7 @@ public abstract class TitanicPatch
         Harmony = HarmonyInstance.Create(HookName);
     }
 
-    public void Patch()
+    public virtual void Patch()
     {
         foreach (MethodInfo method in TargetMethods)
         {

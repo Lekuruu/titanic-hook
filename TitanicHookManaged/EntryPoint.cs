@@ -80,6 +80,7 @@ public static class EntryPoint
         if (Config.RemoveScoreFetchingDelay) PatchManager.Apply(new RemoveScoreDelayHook());
         
         if (Config.HookTcpConnections) PatchManager.Apply(new TcpClientHook());
+        if (Config.HookTcpHttpsUpgrade) PatchManager.Apply(new TcpHttpsUpgradeHook());
         PatchManager.Apply(new DnsHostByNameHook());
         PatchManager.Apply(new StartProcessHook());
         PatchManager.Apply(new BeatmapSubmissionLinksPatch());
