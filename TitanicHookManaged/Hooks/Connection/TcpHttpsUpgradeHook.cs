@@ -135,6 +135,13 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         if (hostname == null)
             return;
         
+        // Verify socket is actually connected before attempting SSL
+        if (!__instance.Connected)
+        {
+            Logging.Warning(HookName, $"Socket not connected after Connect(), skipping SSL for {hostname}");
+            return;
+        }
+        
         bool wasBlocking = __instance.Blocking;
         
         try
