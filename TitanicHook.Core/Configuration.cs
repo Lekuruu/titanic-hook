@@ -41,6 +41,11 @@ public class Configuration
     public bool HookTcpConnections { get; set; } = true;
 
     /// <summary>
+    /// Whether to upgrade raw HTTP TCP connections to HTTPS
+    /// </summary>
+    public bool HookTcpHttpsUpgrade { get; set; } = true;
+
+    /// <summary>
     /// Whether to hook NetLib AddHeaderField
     /// </summary>
     public bool HookNetLibHeaders { get; set; } = true;
@@ -177,6 +182,9 @@ public class Configuration
                 case "HookTcpConnections":
                     HookTcpConnections = bool.Parse(splitLine[1]);
                     break;
+                case "HookTcpHttpsUpgrade":
+                    HookTcpHttpsUpgrade = bool.Parse(splitLine[1]);
+                    break;
                 case "HookNetLibHeaders":
                     HookNetLibHeaders = bool.Parse(splitLine[1]);
                     break;
@@ -231,6 +239,7 @@ public class Configuration
         sw.WriteLine($"LogToFile={LogToFile}");
         sw.WriteLine($"ServerName={ServerName}");
         sw.WriteLine($"HookTcpConnections={HookTcpConnections}");
+        sw.WriteLine($"HookTcpHttpsUpgrade={HookTcpHttpsUpgrade}");
         sw.WriteLine($"HookNetLibHeaders={HookNetLibHeaders}");
         sw.WriteLine($"HookNetLibEncoding={HookNetLibEncoding}");
         sw.WriteLine($"HookModernHostMethod={HookModernHostMethod}");
