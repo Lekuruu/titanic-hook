@@ -51,7 +51,7 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         
         // Socket.EndConnect -> this is where we establish SSL after async connect completes
         PatchMethod("EndConnect", [typeof(IAsyncResult)],
-            null!, nameof(EndConnectPostfix));
+            null, nameof(EndConnectPostfix));
         
         // Socket.Send(...) sync overloads
         PatchMethod("Send", [typeof(byte[]), typeof(int), typeof(int), typeof(SocketFlags)],
@@ -115,7 +115,7 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         }
     }
 
-    private void PatchMethod(string methodName, Type[] paramTypes, string prefixName, string? postfixName = null)
+    private void PatchMethod(string methodName, Type[] paramTypes, string? prefixName, string? postfixName = null)
     {
         var method = typeof(Socket).GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public, null, paramTypes, null);
         if (method == null)
@@ -125,7 +125,7 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
             return;
         }
         
-        MethodInfo prefix = AccessTools.Method(typeof(TcpHttpsUpgradeHook), prefixName);
+        MethodInfo? prefix = prefixName != null ? AccessTools.Method(typeof(TcpHttpsUpgradeHook), prefixName) : null;
         MethodInfo? postfix = postfixName != null ? AccessTools.Method(typeof(TcpHttpsUpgradeHook), postfixName) : null;
         
         try
@@ -387,21 +387,27 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
     /// <summary>
     /// Attempts to establish SSL for a socket that was marked as pending (via BeginConnect)
     /// but never had SSL established (e.g., EndConnect was never called or didn't trigger our postfix).
+    /// Returns true if SSL was established or if the socket isn't ready yet (will retry later).
+    /// Returns false if SSL setup failed permanently.
     /// </summary>
-    public static void TryEstablishSslForPendingSocket(Socket socket)
+    internal static bool TryEstablishSslForPendingSocket(Socket socket)
     {
-        string? hostname = SSLSocketState.GetAndRemovePendingSocket(socket);
-        if (hostname == null)
-            return;
+        // Prevent recursion, ssl handshake will use socket operations internally
+        if (SSLSocketState.IsInsideSslOperation)
+            return true;
         
+        // Don't attempt if socket reports not connected
         if (!socket.Connected)
-        {
-            Logging.Warning($"[{HookName}] Socket not connected, cannot establish SSL for {hostname}");
-            return;
-        }
+            return true;
+        
+        // Peek at hostname without removing, we'll remove only on success
+        string? hostname = SSLSocketState.PeekPendingSocket(socket);
+        if (string.IsNullOrEmpty(hostname))
+            return true;
         
         bool wasBlocking = socket.Blocking;
         
+        SSLSocketState.EnterSslOperation();
         try
         {
             if (!wasBlocking)
@@ -409,15 +415,33 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
             
             if (TryEstablishSslConnection(socket, hostname, out SslStream? sslStream))
             {
+                // Success, now remove from pending and register
+                SSLSocketState.GetAndRemovePendingSocket(socket);
                 SSLSocketState.RegisterSslSocket(socket, sslStream!);
+                return true;
             }
+            else
+            {
+                // SSL handshake failed permanently, remove from pending
+                SSLSocketState.GetAndRemovePendingSocket(socket);
+                return false;
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // Socket not ready yet, keep in pending, will retry on next Send/Receive
+            return true;
         }
         catch (Exception ex)
         {
-            Logging.HookError(HookName, $"Late SSL connection failed: {ex.Message}");
+            // Remove from pending on other errors
+            Logging.HookError(HookName, $"Late SSL setup failed: {ex.Message}");
+            SSLSocketState.GetAndRemovePendingSocket(socket);
+            return false;
         }
         finally
         {
+            SSLSocketState.ExitSslOperation();
             if (!wasBlocking)
             {
                 try { socket.Blocking = false; } catch { }
@@ -510,7 +534,7 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         if (SSLSocketState.IsInsideSslOperation)
             return true;
         
-        // Check if this socket has a pending SSL upgrade that wasn't completed yet
+        // Try to establish SSL if this socket has a pending upgrade
         if (SSLSocketState.HasPendingSocket(__instance) && !SSLSocketState.IsSslSocket(__instance))
             TryEstablishSslForPendingSocket(__instance);
         
@@ -586,7 +610,7 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         if (SSLSocketState.IsInsideSslOperation)
             return true;
         
-        // Check if this socket has a pending SSL upgrade that wasn't completed yet
+        // Try to establish SSL if this socket has a pending upgrade
         if (SSLSocketState.HasPendingSocket(__instance) && !SSLSocketState.IsSslSocket(__instance))
             TryEstablishSslForPendingSocket(__instance);
         
@@ -732,7 +756,7 @@ internal static class SSLSendHelper
         if (SSLSocketState.IsInsideSslOperation)
             return true;
         
-        // Check if this socket has a pending SSL upgrade
+        // Try to establish ssl if this socket has a pending upgrade
         if (SSLSocketState.HasPendingSocket(socket) && !SSLSocketState.IsSslSocket(socket))
             TcpHttpsUpgradeHook.TryEstablishSslForPendingSocket(socket);
         
@@ -796,7 +820,7 @@ internal static class SSLReceiveHelper
         if (SSLSocketState.IsInsideSslOperation)
             return true;
         
-        // Check if this socket has a pending SSL upgrade
+        // Try to establish SSL if this socket has a pending upgrade
         if (SSLSocketState.HasPendingSocket(socket) && !SSLSocketState.IsSslSocket(socket))
             TcpHttpsUpgradeHook.TryEstablishSslForPendingSocket(socket);
         
@@ -943,6 +967,14 @@ internal static class SSLSocketState
         lock (_pendingSockets)
         {
             return _pendingSockets.ContainsKey(socket);
+        }
+    }
+    
+    public static string? PeekPendingSocket(Socket socket)
+    {
+        lock (_pendingSockets)
+        {
+            return _pendingSockets.TryGetValue(socket, out string? hostname) ? hostname : null;
         }
     }
     
