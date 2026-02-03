@@ -133,6 +133,15 @@ public static class Logging // Holy public static void boilerplate class
     }
 
     /// <summary>
+    /// Warning output, unrelated to hook initialization
+    /// </summary>
+    /// <param name="message">Message</param>
+    public static void Warning(string message)
+    {
+        WriteToLog($"[WARN] ({message})");
+    }
+
+    /// <summary>
     /// Normal error output, unrelated to hook initialization
     /// </summary>
     /// <param name="message">Message</param>
