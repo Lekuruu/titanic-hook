@@ -29,11 +29,31 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
 
     public override void Patch()
     {
-        // Socket.Connect(EndPoint)
+        // Socket.Connect(...) sync overloads
         PatchMethod("Connect", [typeof(EndPoint)],
-            nameof(ConnectPrefix), nameof(ConnectPostfix));
+            nameof(ConnectEndPointPrefix), nameof(ConnectPostfix));
+        PatchMethod("Connect", [typeof(IPAddress), typeof(int)],
+            nameof(ConnectIpAddressPortPrefix), nameof(ConnectPostfix));
+        PatchMethod("Connect", [typeof(IPAddress[]), typeof(int)],
+            nameof(ConnectIpAddressArrayPortPrefix), nameof(ConnectPostfix));
+        PatchMethod("Connect", [typeof(string), typeof(int)],
+            nameof(ConnectHostPortPrefix), nameof(ConnectPostfix));
         
-        // Socket.Send(...) overloads
+        // Socket.BeginConnect(...) async overloads
+        PatchMethod("BeginConnect", [typeof(EndPoint), typeof(AsyncCallback), typeof(object)],
+            nameof(BeginConnectEndPointPrefix));
+        PatchMethod("BeginConnect", [typeof(IPAddress), typeof(int), typeof(AsyncCallback), typeof(object)],
+            nameof(BeginConnectIpAddressPortPrefix));
+        PatchMethod("BeginConnect", [typeof(IPAddress[]), typeof(int), typeof(AsyncCallback), typeof(object)],
+            nameof(BeginConnectIpAddressArrayPortPrefix));
+        PatchMethod("BeginConnect", [typeof(string), typeof(int), typeof(AsyncCallback), typeof(object)],
+            nameof(BeginConnectHostPortPrefix));
+        
+        // Socket.EndConnect -> this is where we establish SSL after async connect completes
+        PatchMethod("EndConnect", [typeof(IAsyncResult)],
+            null!, nameof(EndConnectPostfix));
+        
+        // Socket.Send(...) sync overloads
         PatchMethod("Send", [typeof(byte[]), typeof(int), typeof(int), typeof(SocketFlags)],
             nameof(SendOverloadBufferOffsetSizeFlags));
         PatchMethod("Send", [typeof(byte[]), typeof(SocketFlags)],
@@ -43,7 +63,11 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         PatchMethod("Send", [typeof(byte[]), typeof(int), typeof(int), typeof(SocketFlags), typeof(SocketError).MakeByRefType()],
             nameof(SendOverloadBufferOffsetSizeFlagsOutError));
         
-        // Socket.Receive(...) overloads
+        // Socket.BeginSend/EndSend async
+        PatchAsyncMethod("BeginSend", 6, nameof(BeginSendPrefix));
+        PatchAsyncMethod("EndSend", 1, nameof(EndSendPrefix));
+        
+        // Socket.Receive(...) sync overloads
         PatchMethod("Receive", [typeof(byte[]), typeof(int), typeof(int), typeof(SocketFlags)],
             nameof(ReceiveOverloadBufferOffsetSizeFlags));
         PatchMethod("Receive", [typeof(byte[]), typeof(SocketFlags)],
@@ -53,6 +77,10 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         PatchMethod("Receive", [typeof(byte[]), typeof(int), typeof(int), typeof(SocketFlags), typeof(SocketError).MakeByRefType()],
             nameof(ReceiveOverloadBufferOffsetSizeFlagsOutError));
         
+        // Socket.BeginReceive/EndReceive async
+        PatchAsyncMethod("BeginReceive", 6, nameof(BeginReceivePrefix));
+        PatchAsyncMethod("EndReceive", 1, nameof(EndReceivePrefix));
+        
         // Properties and state
         PatchPropertyGetter("Available", nameof(AvailablePrefix));
         PatchMethod("Poll", [typeof(int), typeof(SelectMode)],
@@ -61,6 +89,30 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
             nameof(ShutdownPrefix));
         PatchMethod("Close", [],
             nameof(ClosePrefix));
+    }
+    
+    private void PatchAsyncMethod(string methodName, int paramCount, string prefixName)
+    {
+        bool requiresByteArrayFirst = paramCount == 6;
+        var method = typeof(Socket)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .FirstOrDefault(m => m.Name == methodName &&
+                                 m.GetParameters().Length == paramCount &&
+                                 (!requiresByteArrayFirst || m.GetParameters()[0].ParameterType == typeof(byte[])));
+        if (method == null)
+        {
+            Logging.HookError(HookName, $"Could not find Socket.{methodName}");
+            return;
+        }
+        
+        try
+        {
+            Harmony.Patch(method, new HarmonyMethod(AccessTools.Method(typeof(TcpHttpsUpgradeHook), prefixName)));
+        }
+        catch (Exception ex)
+        {
+            Logging.HookError(HookName, $"Failed to patch Socket.{methodName}: {ex.Message}");
+        }
     }
 
     private void PatchMethod(string methodName, Type[] paramTypes, string prefixName, string? postfixName = null)
@@ -81,7 +133,6 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
             Harmony.Patch(method,
                 prefix != null ? new HarmonyMethod(prefix) : null,
                 postfix != null ? new HarmonyMethod(postfix) : null);
-            Logging.Info($"[{HookName}] Patched Socket.{methodName}");
         }
         catch (Exception ex)
         {
@@ -91,7 +142,9 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
 
     private void PatchPropertyGetter(string propertyName, string prefixName)
     {
-        var method = typeof(Socket).GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public)?.GetGetMethod();
+        var method = typeof(Socket)
+            .GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public)?
+            .GetGetMethod();
         if (method == null)
         {
             Logging.HookError(HookName, $"Could not find Socket.{propertyName} getter");
@@ -103,7 +156,6 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         try
         {
             Harmony.Patch(method, new HarmonyMethod(prefix));
-            Logging.Info($"[{HookName}] Patched Socket.{propertyName}");
         }
         catch (Exception ex)
         {
@@ -113,7 +165,8 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
 
     #region Socket.Connect Hooks
 
-    private static void ConnectPrefix(Socket __instance, ref EndPoint __0)
+    /// <summary>Prefix for Socket.Connect(EndPoint)</summary>
+    private static void ConnectEndPointPrefix(Socket __instance, ref EndPoint __0)
     {
         if (__0 is not IPEndPoint ipEndPoint || ipEndPoint.Port != 80)
             return;
@@ -129,42 +182,165 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         SSLSocketState.AddPendingSocket(__instance, hostname);
     }
 
-    private static void ConnectPostfix(Socket __instance)
+    /// <summary>Prefix for Socket.Connect(IPAddress, int)</summary>
+    private static void ConnectIpAddressPortPrefix(Socket __instance, IPAddress __0, ref int __1)
     {
-        string? hostname = SSLSocketState.GetAndRemovePendingSocket(__instance);
+        if (__1 != 80)
+            return;
+        
+        Logging.HookTrigger(HookName);
+        Logging.HookOutput(HookName, $"Upgrading {__0}:80 -> :443");
+        
+        __1 = 443;
+        
+        string hostname = DnsHostByNameHook.GetHostnameForIp(__0.ToString()) 
+                          ?? __0.ToString();
+        
+        SSLSocketState.AddPendingSocket(__instance, hostname);
+    }
+
+    /// <summary>Prefix for Socket.Connect(IPAddress[], int)</summary>
+    private static void ConnectIpAddressArrayPortPrefix(Socket __instance, IPAddress[] __0, ref int __1)
+    {
+        if (__1 != 80 || __0.Length == 0)
+            return;
+        
+        Logging.HookTrigger(HookName);
+        Logging.HookOutput(HookName, $"Upgrading {__0[0]}:80 -> :443");
+        
+        __1 = 443;
+        
+        string hostname = DnsHostByNameHook.GetHostnameForIp(__0[0].ToString()) 
+                          ?? __0[0].ToString();
+        
+        SSLSocketState.AddPendingSocket(__instance, hostname);
+    }
+
+    /// <summary>Prefix for Socket.Connect(string, int)</summary>
+    private static void ConnectHostPortPrefix(Socket __instance, string __0, ref int __1)
+    {
+        if (__1 != 80)
+            return;
+        
+        Logging.HookTrigger(HookName);
+        Logging.HookOutput(HookName, $"Upgrading {__0}:80 -> :443");
+        
+        __1 = 443;
+        
+        SSLSocketState.AddPendingSocket(__instance, __0);
+    }
+
+    #endregion
+
+    #region Socket.BeginConnect Hooks (Async)
+
+    /// <summary>Prefix for Socket.BeginConnect(EndPoint, AsyncCallback, object)</summary>
+    private static void BeginConnectEndPointPrefix(Socket __instance, ref EndPoint __0)
+    {
+        if (__0 is not IPEndPoint ipEndPoint || ipEndPoint.Port != 80)
+            return;
+        
+        Logging.HookTrigger(HookName);
+        Logging.HookOutput(HookName, $"Upgrading {ipEndPoint.Address}:80 -> :443");
+        
+        __0 = new IPEndPoint(ipEndPoint.Address, 443);
+        
+        string hostname = DnsHostByNameHook.GetHostnameForIp(ipEndPoint.Address.ToString()) 
+                          ?? ipEndPoint.Address.ToString();
+        
+        SSLSocketState.AddPendingSocket(__instance, hostname);
+    }
+
+    /// <summary>Prefix for Socket.BeginConnect(IPAddress, int, AsyncCallback, object)</summary>
+    private static void BeginConnectIpAddressPortPrefix(Socket __instance, IPAddress __0, ref int __1)
+    {
+        if (__1 != 80)
+            return;
+        
+        Logging.HookTrigger(HookName);
+        Logging.HookOutput(HookName, $"Upgrading {__0}:80 -> :443");
+        
+        __1 = 443;
+        
+        string hostname = DnsHostByNameHook.GetHostnameForIp(__0.ToString()) 
+                          ?? __0.ToString();
+        
+        SSLSocketState.AddPendingSocket(__instance, hostname);
+    }
+
+    /// <summary>Prefix for Socket.BeginConnect(IPAddress[], int, AsyncCallback, object)</summary>
+    private static void BeginConnectIpAddressArrayPortPrefix(Socket __instance, IPAddress[] __0, ref int __1)
+    {
+        if (__1 != 80 || __0.Length == 0)
+            return;
+        
+        Logging.HookTrigger(HookName);
+        Logging.HookOutput(HookName, $"Upgrading {__0[0]}:80 -> :443");
+        
+        __1 = 443;
+        
+        string hostname = DnsHostByNameHook.GetHostnameForIp(__0[0].ToString()) 
+                          ?? __0[0].ToString();
+        
+        SSLSocketState.AddPendingSocket(__instance, hostname);
+    }
+
+    /// <summary>Prefix for Socket.BeginConnect(string, int, AsyncCallback, object)</summary>
+    private static void BeginConnectHostPortPrefix(Socket __instance, string __0, ref int __1)
+    {
+        if (__1 != 80)
+            return;
+        
+        Logging.HookTrigger(HookName);
+        Logging.HookOutput(HookName, $"Upgrading {__0}:80 -> :443");
+        
+        __1 = 443;
+        
+        SSLSocketState.AddPendingSocket(__instance, __0);
+    }
+
+    /// <summary>Postfix for Socket.EndConnect(IAsyncResult) - establish SSL after async connect</summary>
+    private static void EndConnectPostfix(Socket __instance) => EstablishSslAfterConnect(__instance, "EndConnect");
+
+    #endregion
+
+    #region Socket.Connect Postfix (Sync)
+
+    private static void ConnectPostfix(Socket __instance) => EstablishSslAfterConnect(__instance, "Connect");
+    
+    private static void EstablishSslAfterConnect(Socket socket, string methodName)
+    {
+        string? hostname = SSLSocketState.GetAndRemovePendingSocket(socket);
         if (hostname == null)
             return;
         
-        // Verify socket is actually connected before attempting SSL
-        if (!__instance.Connected)
+        if (!socket.Connected)
         {
-            Logging.Warning($"Socket not connected after Connect(), skipping SSL for {hostname}");
+            Logging.Warning($"[{HookName}] Socket not connected after {methodName}(), skipping SSL for {hostname}");
             return;
         }
         
-        bool wasBlocking = __instance.Blocking;
+        bool wasBlocking = socket.Blocking;
         
         try
         {
             if (!wasBlocking)
-                __instance.Blocking = true;
+                socket.Blocking = true;
             
-            if (TryEstablishSslConnection(__instance, hostname, out SslStream? sslStream))
+            if (TryEstablishSslConnection(socket, hostname, out SslStream? sslStream))
             {
-                SSLSocketState.RegisterSslSocket(__instance, sslStream!);
-                return;
+                SSLSocketState.RegisterSslSocket(socket, sslStream!);
             }
         }
         catch (Exception ex)
         {
-            Logging.HookError(HookName, $"SSL connection failed: {ex.Message}");
+            Logging.HookError(HookName, $"SSL connection failed ({methodName}): {ex.Message}");
         }
         finally
         {
-            // Restore original blocking mode
             if (!wasBlocking)
             {
-                try { __instance.Blocking = false; } catch { }
+                try { socket.Blocking = false; } catch { }
             }
         }
     }
@@ -175,7 +351,9 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         Exception? lastException = null;
         sslStream = null;
 
-        foreach (var protocol in SSLHelper.GetProtocolsToTry())
+        var protocols = SSLHelper.GetProtocolsToTry();
+
+        foreach (var protocol in protocols)
         {
             try
             {
@@ -204,6 +382,47 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         sslStream?.Dispose();
         sslStream = null;
         return false;
+    }
+
+    /// <summary>
+    /// Attempts to establish SSL for a socket that was marked as pending (via BeginConnect)
+    /// but never had SSL established (e.g., EndConnect was never called or didn't trigger our postfix).
+    /// </summary>
+    public static void TryEstablishSslForPendingSocket(Socket socket)
+    {
+        string? hostname = SSLSocketState.GetAndRemovePendingSocket(socket);
+        if (hostname == null)
+            return;
+        
+        if (!socket.Connected)
+        {
+            Logging.Warning($"[{HookName}] Socket not connected, cannot establish SSL for {hostname}");
+            return;
+        }
+        
+        bool wasBlocking = socket.Blocking;
+        
+        try
+        {
+            if (!wasBlocking)
+                socket.Blocking = true;
+            
+            if (TryEstablishSslConnection(socket, hostname, out SslStream? sslStream))
+            {
+                SSLSocketState.RegisterSslSocket(socket, sslStream!);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logging.HookError(HookName, $"Late SSL connection failed: {ex.Message}");
+        }
+        finally
+        {
+            if (!wasBlocking)
+            {
+                try { socket.Blocking = false; } catch { }
+            }
+        }
     }
 
     #endregion
@@ -275,6 +494,160 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         if (handled)
         {
             __4 = __result >= 0 ? SocketError.Success : SocketError.SocketError;
+            return false;
+        }
+        return true;
+    }
+
+    #endregion
+
+    #region Socket.BeginSend/EndSend Async Hooks
+
+    /// <summary>Prefix for Socket.BeginSend, performs synchronous SSL write and returns completed IAsyncResult</summary>
+    private static bool BeginSendPrefix(Socket __instance, byte[] __0, int __1, int __2,
+        SocketFlags __3, AsyncCallback __4, object __5, ref IAsyncResult __result)
+    {
+        if (SSLSocketState.IsInsideSslOperation)
+            return true;
+        
+        // Check if this socket has a pending SSL upgrade that wasn't completed yet
+        if (SSLSocketState.HasPendingSocket(__instance) && !SSLSocketState.IsSslSocket(__instance))
+            TryEstablishSslForPendingSocket(__instance);
+        
+        var sslStream = SSLSocketState.GetSslStream(__instance);
+        if (sslStream == null)
+            return true;
+        
+        if (!sslStream.CanWrite)
+        {
+            SSLSocketState.RemoveSslSocket(__instance);
+            __result = new CompletedAsyncResult(0, __5, new IOException("SSL stream closed"));
+            __4?.Invoke(__result);
+            return false;
+        }
+        
+        object? socketLock = SSLSocketState.GetSocketLock(__instance);
+        if (socketLock == null)
+            return true;
+        
+        int bytesWritten = 0;
+        Exception? error = null;
+        
+        try
+        {
+            lock (socketLock)
+            {
+                SSLSocketState.EnterSslOperation();
+                try
+                {
+                    sslStream.Write(__0, __1, __2);
+                    sslStream.Flush();
+                    bytesWritten = __2;
+                }
+                finally
+                {
+                    SSLSocketState.ExitSslOperation();
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            error = ex;
+            Logging.HookError(HookName, $"BeginSend SSL write failed: {ex.Message}");
+            SSLSocketState.RemoveSslSocket(__instance);
+        }
+        
+        __result = new CompletedAsyncResult(bytesWritten, __5, error);
+        __4?.Invoke(__result);
+        return false;
+    }
+
+    /// <summary>Prefix for Socket.EndSend, returns pre-computed result from CompletedAsyncResult</summary>
+    private static bool EndSendPrefix(IAsyncResult __0, ref int __result)
+    {
+        if (__0 is CompletedAsyncResult completedResult)
+        {
+            if (completedResult.Error != null)
+                throw completedResult.Error;
+            __result = completedResult.BytesTransferred;
+            return false;
+        }
+        return true;
+    }
+
+    #endregion
+
+    #region Socket.BeginReceive/EndReceive Async Hooks
+
+    /// <summary>Prefix for Socket.BeginReceive, performs synchronous SSL read and returns completed IAsyncResult</summary>
+    private static bool BeginReceivePrefix(Socket __instance, byte[] __0, int __1, int __2,
+        SocketFlags __3, AsyncCallback __4, object __5, ref IAsyncResult __result)
+    {
+        if (SSLSocketState.IsInsideSslOperation)
+            return true;
+        
+        // Check if this socket has a pending SSL upgrade that wasn't completed yet
+        if (SSLSocketState.HasPendingSocket(__instance) && !SSLSocketState.IsSslSocket(__instance))
+            TryEstablishSslForPendingSocket(__instance);
+        
+        var sslStream = SSLSocketState.GetSslStream(__instance);
+        if (sslStream == null)
+            return true;
+        
+        if (!sslStream.CanRead)
+        {
+            SSLSocketState.RemoveSslSocket(__instance);
+            __result = new CompletedAsyncResult(0, __5, new IOException("SSL stream closed"));
+            __4?.Invoke(__result);
+            return false;
+        }
+        
+        object? socketLock = SSLSocketState.GetSocketLock(__instance);
+        if (socketLock == null)
+            return true;
+        
+        int bytesRead = 0;
+        Exception? error = null;
+        
+        try
+        {
+            lock (socketLock)
+            {
+                SSLSocketState.EnterSslOperation();
+                try
+                {
+                    bytesRead = sslStream.Read(__0, __1, __2);
+                }
+                finally
+                {
+                    SSLSocketState.ExitSslOperation();
+                }
+            }
+        }
+        catch (IOException ioEx) when (ioEx.InnerException is SocketException { SocketErrorCode: SocketError.WouldBlock })
+        {
+            bytesRead = 0;
+        }
+        catch (Exception ex)
+        {
+            error = ex;
+            Logging.HookError(HookName, $"BeginReceive SSL read failed: {ex.Message}");
+            SSLSocketState.RemoveSslSocket(__instance);
+        }
+        
+        __result = new CompletedAsyncResult(bytesRead, __5, error);
+        __4?.Invoke(__result);
+        return false;
+    }
+
+    /// <summary>Prefix for Socket.EndReceive, returns pre-computed result from CompletedAsyncResult</summary>
+    private static bool EndReceivePrefix(IAsyncResult __0, ref int __result)
+    {
+        if (__0 is CompletedAsyncResult completedResult)
+        {
+            if (completedResult.Error != null)
+                throw completedResult.Error;
+            __result = completedResult.BytesTransferred;
             return false;
         }
         return true;
@@ -359,7 +732,11 @@ internal static class SSLSendHelper
         if (SSLSocketState.IsInsideSslOperation)
             return true;
         
-        SslStream? sslStream = SSLSocketState.GetSslStream(socket);
+        // Check if this socket has a pending SSL upgrade
+        if (SSLSocketState.HasPendingSocket(socket) && !SSLSocketState.IsSslSocket(socket))
+            TcpHttpsUpgradeHook.TryEstablishSslForPendingSocket(socket);
+        
+        var sslStream = SSLSocketState.GetSslStream(socket);
         if (sslStream == null)
             return true;
         
@@ -370,7 +747,7 @@ internal static class SSLSendHelper
             return false;
         }
         
-        object? socketLock = SSLSocketState.GetSocketLock(socket);
+        var socketLock = SSLSocketState.GetSocketLock(socket);
         if (socketLock == null)
             return true;
         
@@ -419,7 +796,11 @@ internal static class SSLReceiveHelper
         if (SSLSocketState.IsInsideSslOperation)
             return true;
         
-        SslStream? sslStream = SSLSocketState.GetSslStream(socket);
+        // Check if this socket has a pending SSL upgrade
+        if (SSLSocketState.HasPendingSocket(socket) && !SSLSocketState.IsSslSocket(socket))
+            TcpHttpsUpgradeHook.TryEstablishSslForPendingSocket(socket);
+        
+        var sslStream = SSLSocketState.GetSslStream(socket);
         if (sslStream == null)
             return true;
         
@@ -430,7 +811,7 @@ internal static class SSLReceiveHelper
             return false;
         }
         
-        object? socketLock = SSLSocketState.GetSocketLock(socket);
+        var socketLock = SSLSocketState.GetSocketLock(socket);
         if (socketLock == null)
             return true;
         
@@ -557,6 +938,14 @@ internal static class SSLSocketState
         }
     }
     
+    public static bool HasPendingSocket(Socket socket)
+    {
+        lock (_pendingSockets)
+        {
+            return _pendingSockets.ContainsKey(socket);
+        }
+    }
+    
     public static string? GetAndRemovePendingSocket(Socket socket)
     {
         lock (_pendingSockets)
@@ -607,12 +996,33 @@ internal static class SSLSocketState
     {
         lock (_sslSockets)
         {
-            if (_sslSockets.TryGetValue(socket, out SslStream? stream))
+            if (_sslSockets.ContainsKey(socket))
             {
                 _sslSockets.Remove(socket);
                 _socketLocks.Remove(socket);
             }
         }
+    }
+}
+
+/// <summary>
+/// IAsyncResult for completed async operations - allows us to return synchronous SSL results
+/// through the async Socket API
+/// </summary>
+internal class CompletedAsyncResult : IAsyncResult
+{
+    public int BytesTransferred { get; }
+    public Exception? Error { get; }
+    public object? AsyncState { get; }
+    public WaitHandle AsyncWaitHandle { get; } = new ManualResetEvent(true);
+    public bool CompletedSynchronously => true;
+    public bool IsCompleted => true;
+    
+    public CompletedAsyncResult(int bytesTransferred, object? state, Exception? error = null)
+    {
+        BytesTransferred = bytesTransferred;
+        AsyncState = state;
+        Error = error;
     }
 }
 
