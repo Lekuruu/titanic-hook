@@ -135,7 +135,6 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         if (hostname == null)
             return;
         
-        // Ensure socket is in blocking mode for SSL handshake
         bool wasBlocking = __instance.Blocking;
         
         try
@@ -143,58 +142,11 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
             if (!wasBlocking)
                 __instance.Blocking = true;
             
-            var networkStream = new NetworkStream(__instance, ownsSocket: false);
-            var sslStream = new SslStream(
-                networkStream,
-                leaveInnerStreamOpen: true,
-                userCertificateValidationCallback: SSLHelper.ValidateServerCertificate
-            );
-
-            Exception? lastException = null;
-            foreach (var protocol in SSLHelper.GetProtocolsToTry())
+            if (TryEstablishSslConnection(__instance, hostname, out SslStream? sslStream))
             {
-                try
-                {
-                    sslStream.AuthenticateAsClient(hostname, null, protocol, false);
-                    sslStream.Flush();
-                    
-                    if (!sslStream.IsAuthenticated)
-                        throw new InvalidOperationException("SSL stream not authenticated");
-                    
-                    SSLSocketState.RegisterSslSocket(__instance, sslStream);
-                    Logging.HookOutput(HookName, $"SSL handshake OK: {hostname} ({protocol})");
-                    return;
-                }
-                catch (Exception ex)
-                {
-                    lastException = ex;
-
-                    // Reset stream position for retry with different protocol
-                    try
-                    {
-                        if (!sslStream.IsAuthenticated)
-                        {
-                            sslStream.Dispose();
-                            networkStream.Dispose();
-                            networkStream = new NetworkStream(__instance, ownsSocket: false);
-                            sslStream = new SslStream(
-                                networkStream,
-                                leaveInnerStreamOpen: true,
-                                userCertificateValidationCallback: SSLHelper.ValidateServerCertificate
-                            );
-                        }
-                    }
-                    catch
-                    {
-                        // If we can't reset, we're done trying
-                        break;
-                    }
-                }
+                SSLSocketState.RegisterSslSocket(__instance, sslStream!);
+                return;
             }
-            
-            Logging.HookError(HookName, $"SSL handshake failed: {lastException?.Message}");
-            try { sslStream.Dispose(); } catch { }
-            try { networkStream.Dispose(); } catch { }
         }
         catch (Exception ex)
         {
@@ -208,6 +160,43 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
                 try { __instance.Blocking = false; } catch { }
             }
         }
+    }
+
+    private static bool TryEstablishSslConnection(Socket socket, string hostname, out SslStream? sslStream)
+    {
+        NetworkStream? networkStream = null;
+        Exception? lastException = null;
+        sslStream = null;
+
+        foreach (var protocol in SSLHelper.GetProtocolsToTry())
+        {
+            try
+            {
+                networkStream?.Dispose();
+                sslStream?.Dispose();
+                
+                networkStream = new NetworkStream(socket, ownsSocket: false);
+                sslStream = new SslStream(networkStream, leaveInnerStreamOpen: true, SSLHelper.ValidateServerCertificate);
+                sslStream.AuthenticateAsClient(hostname, null, protocol, false);
+                
+                if (!sslStream.IsAuthenticated)
+                    throw new InvalidOperationException("SSL stream not authenticated after handshake");
+                
+                Logging.HookOutput(HookName, $"SSL handshake OK: {hostname} ({protocol})");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+            }
+        }
+        
+        Logging.HookError(HookName, $"SSL handshake failed: {lastException?.Message}");
+        
+        networkStream?.Dispose();
+        sslStream?.Dispose();
+        sslStream = null;
+        return false;
     }
 
     #endregion
