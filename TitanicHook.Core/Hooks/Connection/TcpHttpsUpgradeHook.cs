@@ -49,7 +49,7 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         PatchSocketMethod("BeginConnect", [typeof(string), typeof(int), typeof(AsyncCallback), typeof(object)],
             nameof(BeginConnectHostPortPrefix));
         
-        // Socket.EndConnect - establish SSL after async connect completes
+        // Socket.EndConnect, establish SSL after async connect completes
         PatchSocketMethod("EndConnect", [typeof(IAsyncResult)],
             postfixName: nameof(EndConnectPostfix));
         
@@ -491,6 +491,16 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
                 }
             }
         }
+        catch (ObjectDisposedException)
+        {
+            // Socket/Stream was closed, this is normal during shutdown
+            SslSocketState.RemoveSslSocket(__instance);
+        }
+        catch (IOException)
+        {
+            // Connection was closed
+            SslSocketState.RemoveSslSocket(__instance);
+        }
         catch (Exception ex)
         {
             error = ex;
@@ -635,7 +645,7 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
 
     private static bool ShutdownPrefix(Socket __instance)
     {
-        // Block Shutdown for SSL sockets - it corrupts TLS state
+        // Block Shutdown for SSL sockets, it corrupts TLS state
         return SslSocketState.IsInsideSslOperation || !SslSocketState.IsSslSocket(__instance);
     }
 
