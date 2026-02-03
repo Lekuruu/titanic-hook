@@ -882,7 +882,7 @@ internal static class SSLReceiveHelper
         {
             throw;
         }
-        catch (IOException ioEx) when (ioEx.InnerException is SocketException { SocketErrorCode: SocketError.WouldBlock } sockEx)
+        catch (IOException ex) when (ex.InnerException is SocketException { SocketErrorCode: SocketError.WouldBlock } sockEx)
         {
             throw sockEx;
         }
@@ -892,16 +892,16 @@ internal static class SSLReceiveHelper
             result = 0;
             return false;
         }
-        catch (IOException ioEx)
+        catch (IOException ex)
         {
-            Logging.HookError(HookName, $"SSL IO error: {ioEx.Message}");
+            Logging.Error($"SSL IO error: {ex.Message}");
             SSLSocketState.RemoveSslSocket(socket);
             result = 0;
             return false;
         }
         catch (Exception ex)
         {
-            Logging.HookError(HookName, $"SSL Receive failed: {ex.Message}");
+            Logging.Error($"SSL Receive failed: {ex.Message}");
             result = 0;
             return false;
         }
