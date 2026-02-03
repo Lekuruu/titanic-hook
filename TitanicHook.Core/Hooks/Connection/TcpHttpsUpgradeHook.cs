@@ -135,8 +135,14 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         if (hostname == null)
             return;
         
+        // Ensure socket is in blocking mode for SSL handshake
+        bool wasBlocking = __instance.Blocking;
+        
         try
         {
+            if (!wasBlocking)
+                __instance.Blocking = true;
+            
             var networkStream = new NetworkStream(__instance, ownsSocket: false);
             var sslStream = new SslStream(
                 networkStream,
@@ -162,6 +168,27 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
                 catch (Exception ex)
                 {
                     lastException = ex;
+
+                    // Reset stream position for retry with different protocol
+                    try
+                    {
+                        if (!sslStream.IsAuthenticated)
+                        {
+                            sslStream.Dispose();
+                            networkStream.Dispose();
+                            networkStream = new NetworkStream(__instance, ownsSocket: false);
+                            sslStream = new SslStream(
+                                networkStream,
+                                leaveInnerStreamOpen: true,
+                                userCertificateValidationCallback: SSLHelper.ValidateServerCertificate
+                            );
+                        }
+                    }
+                    catch
+                    {
+                        // If we can't reset, we're done trying
+                        break;
+                    }
                 }
             }
             
@@ -172,6 +199,14 @@ public class TcpHttpsUpgradeHook() : TitanicPatch(HookName)
         catch (Exception ex)
         {
             Logging.HookError(HookName, $"SSL connection failed: {ex.Message}");
+        }
+        finally
+        {
+            // Restore original blocking mode
+            if (!wasBlocking)
+            {
+                try { __instance.Blocking = false; } catch { }
+            }
         }
     }
 
