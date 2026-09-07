@@ -18,8 +18,8 @@ public class DnsHostByNameHook : TitanicPatch
     /// <summary>
     /// Maps resolved IP addresses to their original hostnames
     /// </summary>
-    private static readonly Dictionary<string, string> _ipToHostname = new Dictionary<string, string>();
-    private static readonly object _lock = new object();
+    private static readonly Dictionary<string, string> _ipToHostname = new();
+    private static readonly object _lock = new();
 
     /// <summary>
     /// Resolves the original hostname for an IP address
@@ -27,11 +27,7 @@ public class DnsHostByNameHook : TitanicPatch
     public static string? GetHostnameForIp(string ipAddress)
     {
         lock (_lock)
-        {
-            if (_ipToHostname.TryGetValue(ipAddress, out string? hostname))
-                return hostname;
-            return null;
-        }
+            return _ipToHostname.TryGetValue(ipAddress, out string? hostname) ? hostname : null;
     }
 
     /// <summary>
@@ -61,40 +57,27 @@ public class DnsHostByNameHook : TitanicPatch
     
     #region Hook
 
-    // Store the hostname being resolved (before potential modification)
-    [System.ThreadStatic]
-    private static string? _currentHostname;
-
     private static void InternalGetHostByNamePrefix(ref string __0)
     {
         Logging.HookTrigger(HookName);
         
-        // Store the original hostname for the postfix
-        _currentHostname = __0;
-        
         if (__0.Contains("ppy.sh"))
-        {
             __0 = __0.Replace("ppy.sh", EntryPoint.Config.ServerName);
-            _currentHostname = __0; // Update to the modified hostname
-        }
         else if (__0 == "peppy.chigau.com")
-        {
             __0 = __0.Replace("peppy.chigau.com", $"chigau.{EntryPoint.Config.ServerName}");
-            _currentHostname = __0;
-        }
     }
 
-    private static void InternalGetHostByNamePostfix(IPHostEntry __result)
+    private static void InternalGetHostByNamePostfix(string __0, IPHostEntry __result)
     {
-        if (__result == null || _currentHostname == null)
+        if (__result == null || __0 == null)
             return;
         
         // Record IP -> Hostname mapping for all resolved addresses
         foreach (IPAddress addr in __result.AddressList)
         {
             string ip = addr.ToString();
-            RecordIpHostnameMapping(ip, _currentHostname);
-            Logging.Info($"[{HookName}] Set DNS mapping: {ip} -> {_currentHostname}");
+            RecordIpHostnameMapping(ip, __0);
+            Logging.Info($"[{HookName}] Set DNS mapping: {ip} -> {__0}");
         }
     }
     
