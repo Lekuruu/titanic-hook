@@ -90,7 +90,7 @@ class Program
 
 #if NET40
         // Set the process to be DPI aware
-        // TODO: This should ideally only be run on .NET 4 builds
+        // This fixes the resolution for some .NET 4.0 builds released in 2015
         SetProcessDPIAware();
         
         if (loaded.ImageRuntimeVersion == "v2.0.50727")
