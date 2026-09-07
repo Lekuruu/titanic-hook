@@ -87,8 +87,12 @@ class Program
             Logging.LogAndShowError($"Failed to load osu!.exe\n {e}");
             return;
         }
-        
+
 #if NET40
+        // Set the process to be DPI aware
+        // TODO: This should ideally only be run on .NET 4 builds
+        SetProcessDPIAware();
+        
         if (loaded.ImageRuntimeVersion == "v2.0.50727")
         {
             // CLR abuse to set v2 activation policy at runtime
@@ -193,4 +197,7 @@ class Program
         [MethodImpl(MethodImplOptions.InternalCall, MethodCodeType = MethodCodeType.Runtime)]
         void BindAsLegacyV2Runtime();
     }
+
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
 }
